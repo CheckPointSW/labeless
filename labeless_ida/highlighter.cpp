@@ -83,7 +83,7 @@ static struct HighlightingRules
 		rules.append(HighlightingRule("\\b[+-]?[0-9]+[lL]?\\b", 0, PPET_Number));
 		rules.append(HighlightingRule("\\b[+-]?0[xX][0-9A-Fa-f]+[lL]?\\b", 0, PPET_Number));
 		rules.append(HighlightingRule("\\b[+-]?[0-9]+(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?\\b", 0, PPET_Number));
-		rules.append(HighlightingRule("^[\\s]*(#[^\\n]*)", 0, PPET_Comment));
+		rules.append(HighlightingRule("[\\s]*(#[^\\n]*)", 0, PPET_Comment));
 
 		triSingle = HighlightingRule("'''", 1, PPET_String2);
 		triDouble = HighlightingRule("\"\"\"", 2, PPET_String2);
@@ -168,7 +168,7 @@ void Highlighter::updatePalette(bool invalidate)
 {
 	static const QList<PythonPaletteEntryType> kTypes = QList<PythonPaletteEntryType>()
 		<< PPET_Keyword << PPET_Operator << PPET_Reserved << PPET_Brace << PPET_Defclass << PPET_String << PPET_String2
-		<< PPET_Comment << PPET_Self << PPET_Number;
+		<< PPET_Comment << PPET_Self << PPET_Number << PPET_Highlight;
 	if (invalidate)
 		*m_Palette = PythonPaletteManager::instance().palette();
 

@@ -138,7 +138,8 @@ void SettingsDialog::setUpPalette()
 		{ tr("String between triple quotes '''' and \"\"\""),	PPET_String2 },
 		{ tr("Comment"),										PPET_Comment },
 		{ tr("Self"),											PPET_Self },
-		{ tr("Number"),											PPET_Number }
+		{ tr("Number"),											PPET_Number },
+		{ tr("Highlight bground"),								PPET_Highlight }
 	};
 
 	QTableWidgetItem* const light = new QTableWidgetItem(tr("light"));
@@ -296,7 +297,11 @@ void SettingsDialog::updateCurrentPalette()
 
 	const FormatSpec& spec = *it;
 
-	m_UI->wPaletteColor->setStyleSheet(QString("background-color: %1;").arg(spec.color.name()));
+	m_UI->wPaletteColor->setStyleSheet(QString("background-color: rgba(%1, %2, %3, %4);")
+		.arg(spec.color.red())
+		.arg(spec.color.green())
+		.arg(spec.color.blue())
+		.arg(spec.color.alpha()));
 	m_UI->wPaletteColor->setProperty(kPropColor.c_str(), QVariant::fromValue(spec.color));
 	m_UI->chPaletteBold->setChecked((spec.modifiers & FormatSpec::MOD_Bold) == FormatSpec::MOD_Bold);
 	m_UI->chPaletteItalic->setChecked((spec.modifiers & FormatSpec::MOD_Italic) == FormatSpec::MOD_Italic);
@@ -336,6 +341,8 @@ void SettingsDialog::on_bPalettePickColor_clicked()
 
 	QColor c = m_UI->wPaletteColor->property(kPropColor.c_str()).value<QColor>();
 	QColorDialog cd(c);
+	cd.setOption(QColorDialog::ShowAlphaChannel);
+
 	if (QColorDialog::Accepted != cd.exec())
 		return;
 
@@ -346,7 +353,12 @@ void SettingsDialog::on_bPalettePickColor_clicked()
 		return;
 
 	pPalette->palette[ppet].color = c;
-	m_UI->wPaletteColor->setStyleSheet(QString("background-color: %1;").arg(c.name()));
+	m_UI->wPaletteColor->setStyleSheet(QString("background-color: rgba(%1, %2, %3, %4);")
+		.arg(c.red())
+		.arg(c.green())
+		.arg(c.blue())
+		.arg(c.alpha())
+	);
 	m_UI->wPaletteColor->setProperty(kPropColor.c_str(), QVariant::fromValue(c));
 	m_UI->tePalettePreview->setPalette(*pPalette);
 	m_PaletteChanged = true;
@@ -402,7 +414,7 @@ void SettingsDialog::on_bResetPalette_clicked()
 	if (!itLight || !itDark)
 		return;
 	PythonPalette* const lightPalette = static_cast<PythonPalette*>(itLight->data(PIR_PPalette).value<void*>());
-	PythonPalette* const darkPalette = static_cast<PythonPalette*>(itLight->data(PIR_PPalette).value<void*>());
+	PythonPalette* const darkPalette = static_cast<PythonPalette*>(itDark->data(PIR_PPalette).value<void*>());
 	if (!lightPalette || !darkPalette)
 		return;
 	*lightPalette = PythonPaletteManager::getDefaultLightPalette();

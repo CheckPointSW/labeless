@@ -12,6 +12,7 @@
 #include <sstream>
 #include <vector>
 #include <WinSock2.h>
+#include <IPHlpApi.h>
 #include "../common/cpp/rpc.pb.h"
 
 namespace util {
@@ -144,41 +145,71 @@ std::string randStr(int len)
 	return rv;
 }
 
-bool broadcastPaused(const PausedInfo& info, const GUID& instanceId)
+std::deque<xstring> getNetworkInterfacess()
 {
-	SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
-	if (INVALID_SOCKET == s)
+	std::deque<xstring> rv;
+
+	ULONG infoLen = 0;
+	ULONG erradapt = ::GetAdaptersInfo(nullptr, &infoLen);
+	if (ERROR_BUFFER_OVERFLOW != erradapt)
+		return rv;
+
+	std::string buff(infoLen, '\0');
+	erradapt = ::GetAdaptersInfo(PIP_ADAPTER_INFO(&buff[0]), &infoLen);
+	if (ERROR_SUCCESS != erradapt)
+		return rv;
+
+	PIP_ADAPTER_INFO pInfo = PIP_ADAPTER_INFO(&buff[0]);
+
+	do
+	{
+		IP_ADDR_STRING* pNext = &pInfo->IpAddressList;
+		while (pNext)
+		{
+			rv.push_back(mb2w(pNext->IpAddress.String));
+			pNext = pNext->Next;
+		}
+		pInfo = pInfo->Next;
+	} while (pInfo);
+
+	return rv;
+}
+
+bool copyToClipboard(HWND h, const xstring& data)
+{
+	if (data.empty())
 		return false;
 
-	int bTrue = 1;
-	if (SOCKET_ERROR == setsockopt(s, SOL_SOCKET, SO_BROADCAST, reinterpret_cast<const char*>(&bTrue), sizeof(bTrue)))
+	if (!OpenClipboard(h))
 	{
-		closesocket(s);
+		Addtolist(0, RED, L"LL: Cannot open clipboard");
 		return false;
 	}
 
-	sockaddr_in sin = {};
-	sin.sin_port = ntohs(12344); // TODO
-	sin.sin_family = AF_INET;
-	sin.sin_addr.S_un.S_addr = INADDR_BROADCAST;
+	EmptyClipboard();
+	bool rv = false;
+	if (HGLOBAL hGlob = GlobalAlloc(GMEM_MOVEABLE, (data.length() + 1) * sizeof(wchar_t)))
+	{
+		wchar_t* pOut = reinterpret_cast<wchar_t*>(GlobalLock(hGlob));
+		if (pOut)
+		{
+			wcsncpy_s(pOut, data.length() + 1, data.c_str(), data.length());
+			SetClipboardData(CF_UNICODETEXT, pOut);
+			GlobalUnlock(hGlob);
+			rv = true;
+		}
+		else
+		{
+			Addtolist(0, RED, L"LL: GlobalLock failed");
+		}
+	}
+	else
+	{
+		Addtolist(0, RED, L"LL: GlobalAlloc failed");
+	}
+	CloseClipboard();
 
-	rpc::PausedNotification pn;
-	pn.set_backend_id(&instanceId, sizeof(instanceId));
-
-	auto info32 = pn.mutable_info32();
-	info32->set_ip(info.ip);
-	info32->set_flags(info.flags);
-
-	for (unsigned i = 0; i < NREG; ++i)
-		info32->add_r(info.r[i]);
-
-	for (unsigned i = 0; i < NSEG; ++i)
-		info32->add_s(info.s[i]);
-
-	const std::string& serialized = pn.SerializeAsString();
-	const bool ok = SOCKET_ERROR != sendto(s, reinterpret_cast<const char*>(serialized.c_str()), serialized.size(), 0, reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
-	closesocket(s);
-	return ok;
+	return rv;
 }
 
 } // util

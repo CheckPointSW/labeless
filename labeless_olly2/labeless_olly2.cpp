@@ -11,11 +11,13 @@
 
 #include <strsafe.h>
 #include <intsafe.h>
+#include <sstream>
 
 #include "labeless_olly2.h"
 #include "sdk/Plugin.h"
 
 #include "labeless.h"
+#include "util.h"
 #include "../common/version.h"
 
 namespace {
@@ -29,7 +31,9 @@ enum MenuAction
 	MA_ShowConfig,
 	MA_About,
 	MA_SetBroadcastPort,
-	MA_DisableBroadcast
+	MA_DisableBroadcast,
+	MA_JumpInIDA,
+	MA_CopyBackendId,
 };
 
 
@@ -66,7 +70,12 @@ static t_menu kMainMenu [] =
 		K_NONE, handle_menu, NULL, MA_DisableBroadcast
 	},
 	{
-		L"|Show config",
+		L"|Copy BackendId",
+		L"Copy BackendId for Pause Notification.",
+		K_NONE, handle_menu, NULL, MA_CopyBackendId
+	},
+	{
+		L"Show config",
 		L"Shows configuration dialog.",
 		K_NONE, handle_menu, NULL, MA_ShowConfig
 	},
@@ -78,8 +87,19 @@ static t_menu kMainMenu [] =
 	{ NULL, NULL, K_NONE, NULL, NULL, 0 }
 };
 
+static t_menu kJumpInIDAMenu[] =
+{
+	{
+		L"LL: Jump In IDA",
+		L"Jump to the address in IDA",
+		K_NONE, handle_menu, NULL, MA_JumpInIDA
+	},
+	{ NULL, NULL, K_NONE, NULL, NULL, 0 }
+};
+
 static WNDPROC g_oldWndProc;
 static HWND g_hOptionsBtn;
+static bool g_pythonInitialized;
 
 LRESULT CALLBACK wndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
@@ -100,10 +120,58 @@ static const std::wstring kSettingsLabelessPort = L"labeless-port";
 static const std::wstring kSettingsLabelessFilterIP = L"labeless-filter-ip";
 
 
-} // anonymous
-
 static HWND hwMain = nullptr;
 static HINSTANCE g_hInstance;
+
+void showConfig()
+{
+	const auto port = Labeless::instance().port();
+
+	std::wstringstream ss;
+	ss << L"Listening at:\n";
+
+	auto ifaces = util::getNetworkInterfacess();
+	for (auto it = ifaces.begin(), end = ifaces.end(); it != end; ++it)
+		ss << L"  " << *it << L':' << port << std::endl;
+
+	ss
+		<< L"Allowed connect from IP: "
+		<< (Labeless::instance().filterIP().empty() ? L"any" : Labeless::instance().filterIP())
+		<< std::endl;
+
+	ss << "Python initialized: " << (g_pythonInitialized ? L"OK" : L"FAILED");
+
+	if (!ifaces.empty())
+		ss << "\n\nCopy the first address to clipboard?";
+
+	const int rv = MessageBoxW(hwMain, ss.str().c_str(), L"Labeless config", ifaces.empty()
+		? MB_ICONINFORMATION
+		: MB_ICONQUESTION | MB_YESNO);
+
+	if (!ifaces.empty() && rv == IDYES)
+		util::copyToClipboard(hwMain, ifaces.front());
+
+}
+
+void copyBackendId()
+{
+	wchar_t backendId[50] = {};
+	StringFromGUID2(Labeless::instance().instanceId(), backendId, _countof(backendId));
+
+	util::copyToClipboard(hwMain, backendId);
+
+	const auto port = Labeless::instance().port();
+
+	const int rv = MessageBoxW(hwMain,
+		L"Backend ID copied to the Clipboard.\r\nDo you want to turn on Pause Notifications sending?",
+		L"", MB_ICONQUESTION | MB_YESNO);
+
+	if (rv == IDYES)
+		Labeless::instance().turnOnPauseNotificationBroadcasting();
+}
+
+} // anonymous
+
 
 #define UDD_ID 0xC4A86984;
 
@@ -141,7 +209,7 @@ extc int __cdecl ODBG2_Plugininit(void)
 		L"%s", buff);
 	ll.setFilterIP(buff);
 
-	if (!Labeless::instance().init())
+	if (!(g_pythonInitialized = Labeless::instance().init()))
 	{
 		log_r("labeless::init() failed.");
 		return -1;
@@ -186,7 +254,16 @@ extc int __cdecl ODBG2_Pluginquery(int ollydbgversion, ulong *features, wchar_t 
 int handle_menu(t_table* pTable, wchar_t* pName, ulong index, int nMode)
 {
 	if (nMode == MENU_VERIFY)
+	{
+		if (static_cast<MenuAction>(index) == MA_JumpInIDA)
+		{
+			if (::run.status == STAT_IDLE)
+				return MENU_ABSENT;
+			if (!Labeless::instance().pauseNotificationsEnabled())
+				return MENU_GRAYED;
+		}
 		return MENU_NORMAL;
+	}
 	if (nMode != MENU_EXECUTE)
 		return MENU_ABSENT;
 
@@ -205,19 +282,13 @@ int handle_menu(t_table* pTable, wchar_t* pName, ulong index, int nMode)
 		Labeless::instance().onSetIPFilter();
 		break;
 	case MA_SetBroadcastPort:
-		Labeless::instance().onSetPauseNotificationBroadcastPort();
+		Labeless::instance().askPortAndTurnOnPauseNotificationBroadcasting();
 		break;
 	case MA_DisableBroadcast:
 		Labeless::instance().onDisablePauseNotificationsBroadcast();
 		break;
 	case MA_ShowConfig:
-		do {
-			wchar_t buff[MAX_PATH] = {};
-			StringCchPrintfW(buff, MAX_PATH, L"Listening port: %u\r\nAllowed connect from IP: %s",
-				Labeless::instance().port(),
-				Labeless::instance().filterIP().empty() ? L"any" : Labeless::instance().filterIP().c_str());
-			MessageBoxW(hwMain, buff, L"Labeless config", MB_ICONINFORMATION);
-		} while (0);
+		showConfig();
 		break;
 	case MA_About:
 		do {
@@ -231,6 +302,12 @@ int handle_menu(t_table* pTable, wchar_t* pName, ulong index, int nMode)
 			break;
 		} while (0);
 		break;
+	case MA_JumpInIDA:
+		Labeless::instance().notifyPaused(Labeless::PauseOrigin::CPUMenu);
+		break;
+	case MA_CopyBackendId:
+		copyBackendId();
+		break;
 	}
 
 	return MENU_NOREDRAW;
@@ -240,6 +317,8 @@ extc t_menu* __cdecl ODBG2_Pluginmenu(wchar_t* type)
 {
 	if (wcscmp(type, PWM_MAIN) == 0)
 		return kMainMenu;
+	if (wcscmp(type, PWM_DISASM) == 0 || wcscmp(type, PWM_DUMP) == 0)
+		return kJumpInIDAMenu;
 
 	return NULL;
 }
@@ -254,7 +333,7 @@ extc void cdecl ODBG2_Pluginnotify(int code, void *data, ulong parm1, ulong parm
 	if (code != PN_STATUS || parm1 != STAT_PAUSED)
 		return;
 
-	Labeless::instance().notifyPaused();
+	Labeless::instance().notifyPaused(Labeless::PauseOrigin::Debug);
 }
 
 void storePort(WORD port)

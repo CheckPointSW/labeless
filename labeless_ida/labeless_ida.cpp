@@ -1338,6 +1338,8 @@ void Labeless::onLoadStubDBRequested()
 		QMessageBox::critical(util::ida::findIDAMainWindow(), tr("!"), tr("Unable to open file \"%1\" for write").arg(sampleFileName));
 		return;
 	}
+	raw[0] = 'M';
+	raw[1] = 'Z';
 	f.write(raw);
 	f.close();
 	term_database();
@@ -1912,12 +1914,39 @@ bool Labeless::mergeMemoryRegion(IDADump& icInfo, const ReadMemoryRegions::t_mem
 
 	getRegionPermissionsAndType(icInfo, m, perm, type);
 
-	segment_t seg;
-	if (!createSegment(area, perm, type, m.raw, seg))
+	// check if all the region belongs to existing segment(s) or create segment otherwise
+	bool belongs = true;
+	const uchar bitness = ::inf.is_64bit() ? 2 : 1;
+	const segment_t* pSeg = nullptr;
+
+	for (ea_t ea = START_RANGE_EA(&area); ea < END_RANGE_EA(&area); ++ea)
 	{
-		msg("%s: createSegment() failed\n", __FUNCTION__);
-		return false;
+		if (!(pSeg = ::getseg(ea)) || pSeg->perm != perm || pSeg->type != type || pSeg->bitness != bitness)
+		{
+			belongs = false;
+			break;
+		}
 	}
+	if (!belongs)
+	{
+		segment_t seg;
+		if (!createSegment(area, perm, type, m.raw, seg))
+		{
+			msg("%s: createSegment() failed\n", __FUNCTION__);
+			return false;
+		}
+	}
+
+	mem2base(m.raw.c_str(), START_RANGE_EA(&area), END_RANGE_EA(&area), -1);
+
+#if (IDA_SDK_VERSION < 700)
+	do_unknown_range(START_RANGE_EA(&area), area.size(), DOUNK_EXPAND);
+	noUsed(area.startEA, area.endEA); // plan to reanalyze
+#else // IDA_SDK_VERSION < 700
+	auto_mark_range(START_RANGE_EA(&area), END_RANGE_EA(&area), AU_FINAL);
+	auto_mark_range(START_RANGE_EA(&area), END_RANGE_EA(&area), AU_USED);
+#endif // IDA_SDK_VERSION < 700
+
 	return true;
 }
 
@@ -1980,15 +2009,6 @@ bool Labeless::createSegment(const compat::IDARange& area, uchar perm, uchar typ
 		msg("%s: set_default_sreg_value('ss') failed\n", __FUNCTION__);
 #endif // IDA_SDK_VERSION < 700
 
-	mem2base(data.c_str(), START_RANGE_EA(&area), END_RANGE_EA(&area), -1);
-
-#if (IDA_SDK_VERSION < 700)
-	do_unknown_range(START_RANGE_EA(&area), area.size(), DOUNK_EXPAND);
-	noUsed(area.startEA, area.endEA); // plan to reanalyze
-#else // IDA_SDK_VERSION < 700
-	auto_mark_range(START_RANGE_EA(&area), END_RANGE_EA(&area), AU_FINAL);
-	auto_mark_range(START_RANGE_EA(&area), END_RANGE_EA(&area), AU_USED);
-#endif // IDA_SDK_VERSION < 700
 	return true;
 }
 
@@ -2270,6 +2290,7 @@ void Labeless::onPauseNotificationReceived(void* pausedNotification)
 	std::shared_ptr<void> guard(nullptr, [notif](void*) {
 		delete notif;
 	});
+	(void)guard;
 
 	const bool compatible = ::inf.is_64bit() && notif->has_info64() || !::inf.is_64bit() && notif->has_info32() || !notif->has_backend_id();
 	if (!compatible)
@@ -2299,6 +2320,63 @@ void Labeless::onPauseNotificationReceived(void* pausedNotification)
 	}
 	m_PauseNotificationCursor = jmpEA;
 	set_item_color(m_PauseNotificationCursor, kPauseNotificationCursorColor);
+	// format comment:
+	qstring cmt;
+	compat::get_cmt(&cmt, jmpEA, false);
+	QString scmt = cmt.c_str();
+	auto chunks = scmt.split("\n", QString::SkipEmptyParts);
+	QString operandsStr;
+	// compare bytes from request and form db
+	//get_bytes()
+	for (int opNum = 0; opNum < notif->operands_size(); ++opNum)
+	{
+		const auto &op = notif->operands(opNum);
+		if (!op.comment().empty())
+		{
+			operandsStr += QStringLiteral("op%1{%2}")
+				.arg(op.opnum())
+				.arg(QString::fromStdString(op.comment()));
+		}
+	}
+	std::string resolvedStringComment;
+	static const std::string kComment = "comment";
+	for (int i = 0; i < notif->resolved_size(); ++i)
+	{
+		if (notif->resolved(i).name() == kComment)
+		{
+			resolvedStringComment = notif->resolved(i).value();
+			break;
+		}
+	}
+
+	std::string resolvedStringReference;
+
+	if (!resolvedStringComment.empty() && operandsStr.indexOf(QString::fromStdString(resolvedStringComment)) == -1)
+	{
+		static const std::string kASCIIPrefix = "ASCII \"";
+		static const std::string kUNICODEPrefix = "UNICODE \"";
+
+		bool isUnicodeStr = false;
+		if (resolvedStringComment.find(kASCIIPrefix) == 0)
+			resolvedStringReference = resolvedStringComment.substr(kASCIIPrefix.length(), resolvedStringComment.length() - kASCIIPrefix.length() - 1);
+		else if (isUnicodeStr = (resolvedStringComment.find(kUNICODEPrefix) == 0))
+			resolvedStringReference = resolvedStringComment.substr(kUNICODEPrefix.length(), resolvedStringComment.length() - kUNICODEPrefix.length() - 1); // TODO: decode?
+
+		if (!resolvedStringReference.empty())
+		{
+			operandsStr += QStringLiteral("%1str{\"%2\"}")
+				.arg(isUnicodeStr ? QStringLiteral("w") : QString{})
+				.arg(QString::fromStdString(resolvedStringReference));
+		}
+	}
+
+	if (!chunks.contains(operandsStr))
+	{
+		chunks << operandsStr;
+		const auto &newCmt = chunks.join("\n");
+		if (newCmt != scmt)
+			set_cmt(jmpEA, newCmt.toUtf8().data(), false);
+	}
 	QEventLoop loop; // kludge: if ::jumpto goes after set_item_color then IDA will scroll the disasm view to make m_PausedNotificationCursor be the 5th line
 	loop.processEvents(QEventLoop::AllEvents, 10);
 	::jumpto(m_PauseNotificationCursor, 0, UIJMP_IDAVIEW);
@@ -2437,7 +2515,7 @@ void Labeless::onJumpFromFinished()
 	}
 
 	const ea_t ea = static_cast<ea_t>(jtf->va);
-	if (compat::get_flags(ea))
+	if (compat::is_enabled(ea))
 		::jumpto(ea);
 	else
 		msg("%s: JUMP to <dbg> ea -> in IDA cannot find given address\n", __FUNCTION__);
@@ -2905,7 +2983,7 @@ hook_cb_t_ret_type_t Labeless::idp_callback(void* /*user_data*/, int notificatio
 	case PROCESSOR_T_NEWFILE:
 	case PROCESSOR_T_OLDFILE:
 		do {
-			const bool compat = ph.id == PLFM_386 && inf.filetype == f_PE;
+			const bool compat = ph.id == PLFM_386 && (inf.filetype == f_PE || inf.filetype == f_BIN);
 			if (compat)
 			{
 				ll.setEnabled();

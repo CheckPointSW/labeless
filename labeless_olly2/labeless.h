@@ -91,15 +91,22 @@ public:
 
 	void onSetPortRequested();
 	void onSetIPFilter();
-	void onSetPauseNotificationBroadcastPort();
+	void askPortAndTurnOnPauseNotificationBroadcasting();
 	void onDisablePauseNotificationsBroadcast();
+	void turnOnPauseNotificationBroadcasting();
 
 	inline ClientData& clientData() { return m_Rpc; }
 	inline const ClientData& clientData() const { return m_Rpc; }
 
 	inline bool pauseNotificationsEnabled() const { return m_PauseNotificationsEnabled; }
 
-	void notifyPaused();
+	enum class PauseOrigin
+	{
+		Debug,
+		CPUMenu,
+	};
+
+	void notifyPaused(PauseOrigin origin);
 
 private:
 	void logInitPythonFail(const xstring& info) const;
